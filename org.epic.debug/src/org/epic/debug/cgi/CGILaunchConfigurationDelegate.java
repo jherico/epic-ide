@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.IOException;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import org.eclipse.core.runtime.CoreException;
@@ -18,8 +19,11 @@ import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchConfiguration;
 import org.eclipse.debug.core.model.IProcess;
 import org.eclipse.jetty.server.Handler;
+import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.handler.HandlerList;
 import org.eclipse.jetty.server.handler.ResourceHandler;
+import org.eclipse.jetty.server.nio.SelectChannelConnector;
+import org.eclipse.jetty.xml.XmlConfiguration;
 import org.epic.core.PerlCore;
 import org.epic.core.PerlProject;
 import org.epic.core.util.PerlExecutableUtilities;
@@ -35,6 +39,7 @@ import org.jdom.output.XMLOutputter;
 import com.google.common.base.Charsets;
 import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
+import com.google.common.collect.Iterables;
 import com.google.common.io.Files;
 
 /**
@@ -43,14 +48,14 @@ import com.google.common.io.Files;
 public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
 {
 
-    private static final String JETTY_CLASSPATH;
+    private static final List<String> JETTY_COMMANDLINE;
 
     static
     {
-        // Statically build the class path component for the jetty command line
-        final String jettyVersion = "7.6.2.v20120308";
         try
         {
+            // build the class path component for the jetty command line
+            
             // All the required jars are bundled in the org.epic.lib plugin
             File libDir = new File(FileLocator.getBundleFile(Platform.getBundle("org.epic.lib")), "lib");
 
@@ -58,17 +63,17 @@ public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
             List<String> classpath = new ArrayList<String>();
             classpath.add(new File(libDir, "guava-11.0.2.jar").getAbsolutePath());
             classpath.add(new File(libDir, "servlet-api-2.5.jar").getAbsolutePath());
-
-            {
-                final String[] jettyModules = new String[] { "jetty-server", "jetty-http", "jetty-io", "jetty-util",
-                    "jetty-xml", "jetty-security", "jetty-servlet", "jetty-webapp", "jetty-continuation",
-                    "jetty-servlets" };
-
-                for (String module : jettyModules)
-                {
-                    classpath.add(new File(libDir, module + "-" + jettyVersion + ".jar").toString());
-                }
-            }
+            classpath.add(new File(libDir, "log4j-1.2.16.jar").getAbsolutePath());
+            classpath.add(new File(libDir, "slf4j-api-1.6.4.jar").getAbsolutePath());
+            classpath.add(new File(libDir, "slf4j-log4j12-1.6.4.jar").getAbsolutePath());
+            classpath.add(new File(libDir, "jetty-server-7.6.2.v20120308").getAbsolutePath());
+            classpath.add(new File(libDir, "jetty-http-7.6.2.v20120308").getAbsolutePath());
+            classpath.add(new File(libDir, "jetty-io-7.6.2.v20120308").getAbsolutePath());
+            classpath.add(new File(libDir, "jetty-util-7.6.2.v20120308").getAbsolutePath());
+            classpath.add(new File(libDir, "jetty-xml-7.6.2.v20120308").getAbsolutePath());
+            classpath.add(new File(libDir, "jetty-security-7.6.2.v20120308").getAbsolutePath());
+            classpath.add(new File(libDir, "jetty-servlet-7.6.2.v20120308").getAbsolutePath());
+            classpath.add(new File(libDir, "jetty-continuation-7.6.2.v20120308").getAbsolutePath());
 
             // Add ourselves to the classpath, since we define the handler
             // The complexity here is because the classpath differs depending
@@ -105,7 +110,14 @@ public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
                 }
 
             }
-            JETTY_CLASSPATH = Joiner.on(File.pathSeparator).join(classpath);
+            
+            List<String> commandLine = new ArrayList<String>();
+            commandLine.add(System.getProperty("java.home") + File.separator + "bin" + File.separator + "java");
+            commandLine.add("-cp");
+            commandLine.add(Joiner.on(File.pathSeparator).join(classpath));
+            commandLine.add("org.eclipse.jetty.xml.XmlConfiguration");
+            commandLine.add("jetty.xml");
+            JETTY_COMMANDLINE = Collections.unmodifiableList(commandLine);
         }
         catch (IOException e)
         {
@@ -151,7 +163,7 @@ public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
             {
                 // Launch the proxy listening thread
                 cgiProxy.startListening();
-                // Launch the jetty process which will connect to it
+                
                 process = startJetty(launch, cgiProxy, serverPort, debugPort);
                 try
                 {
@@ -244,7 +256,7 @@ public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
     }
 
     @SuppressWarnings("unchecked")
-    private File buildJettyConfig(ILaunch launch, CGIProxy cgiProxy, int webServerPort, RemotePort debugPort)
+    private String buildJettyConfig(ILaunch launch, CGIProxy cgiProxy, int webServerPort, RemotePort debugPort)
         throws CoreException, IOException
     {
         Element configure = new Element("Configure");
@@ -361,7 +373,7 @@ public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
             }
 
             // Trigger the connection to the proxy
-            handler.addContent(new Element("Call").setAttribute("name", "init"));
+            handler.addContent(new Element("Call").setAttribute("name", "connectToCGIProxy"));
         }
 
         // Resource handler configurations
@@ -375,20 +387,19 @@ public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
             resourceHandler.addContent(new Element("Set").setAttribute("name", "directoriesListed").setText("true"));
         }
 
-        File xmlFile = new File("/var/cgi/jetty.xml");
-        // File xmlFile = File.createTempFile("jetty-cgi", "xml");
-        Files.write(new XMLOutputter().outputString(doc), xmlFile, Charsets.UTF_8);
-        return xmlFile;
+        return new XMLOutputter().outputString(doc);
     }
-
+    
     private IProcess startJetty(ILaunch launch, CGIProxy cgiProxy, int webServerPort, RemotePort debugPort)
         throws CoreException
     {
 
-        File xmlConfig;
         try
         {
-            xmlConfig = buildJettyConfig(launch, cgiProxy, webServerPort, debugPort);
+            String xml = buildJettyConfig(launch, cgiProxy, webServerPort, debugPort);
+            File xmlFile = new File(PerlDebugPlugin.getDefault().getStateLocation().toFile(), 
+                "jetty.xml");
+            Files.write(xml, xmlFile, Charsets.UTF_8);
         }
         catch (RuntimeException e)
         {
@@ -400,17 +411,12 @@ public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
                 "Could not create configuration file for web server.", e));
         }
 
-        List<String> commandLine = new ArrayList<String>();
-        commandLine.add(System.getProperty("java.home") + File.separator + "bin" + File.separator + "java");
-        commandLine.add("-cp");
-        commandLine.add(JETTY_CLASSPATH);
-        commandLine.add("org.eclipse.jetty.xml.XmlConfiguration");
-        commandLine.add(xmlConfig.getAbsolutePath());
         Process jettyProcess;
         try
         {
-            jettyProcess = new ProcessBuilder(commandLine).directory(
-                PerlDebugPlugin.getDefault().getStateLocation().toFile()).start();
+            jettyProcess = new ProcessBuilder(JETTY_COMMANDLINE).
+                directory(PerlDebugPlugin.getDefault().getStateLocation().toFile()).
+                start();
         }
         catch (RuntimeException e)
         {
