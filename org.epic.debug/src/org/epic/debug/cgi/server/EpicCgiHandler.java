@@ -36,7 +36,6 @@ import org.eclipse.jetty.http.MimeTypes;
 import org.eclipse.jetty.server.Request;
 import org.eclipse.jetty.server.Response;
 import org.epic.debug.util.ExecutionArguments;
-import org.slf4j.Logger;
 
 import com.google.common.base.Charsets;
 import com.google.common.base.Function;
@@ -46,7 +45,6 @@ import com.google.common.base.Splitter;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.io.CharStreams;
 
 /**
  * Handler for implementing cgi/1.1 interface. This implementation allows either

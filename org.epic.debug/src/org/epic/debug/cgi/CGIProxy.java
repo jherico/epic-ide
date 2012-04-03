@@ -9,12 +9,18 @@ package org.epic.debug.cgi;
 
 import java.io.IOException;
 
+import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.PlatformObject;
 import org.eclipse.debug.core.DebugEvent;
 import org.eclipse.debug.core.DebugException;
 import org.eclipse.debug.core.DebugPlugin;
 import org.eclipse.debug.core.ILaunch;
+import org.eclipse.debug.core.ILaunchConfigurationWorkingCopy;
+import org.eclipse.debug.core.model.IDebugTarget;
+import org.eclipse.debug.core.model.IProcess;
 import org.eclipse.debug.core.model.IStreamMonitor;
 import org.eclipse.debug.core.model.IStreamsProxy;
+import org.eclipse.debug.core.model.ITerminate;
 import org.epic.debug.PerlDebugPlugin;
 import org.epic.debug.util.OutputStreamMonitor;
 import org.epic.debug.util.RemotePort;
@@ -25,12 +31,13 @@ import org.epic.debug.util.RemotePort;
  *         To change the template for this generated type comment go to
  *         Window&gt;Preferences&gt;Java&gt;Code Generation&gt;Code and Comments
  */
-public class CGIProxy extends LaunchWrapperProcess
+public class CGIProxy extends PlatformObject implements IProcess, ITerminate
 {
     private volatile boolean mIsConnected;
     private OutputStreamMonitor mMonitorError;
     private OutputStreamMonitor mMonitorOut;
     private OutputStreamMonitor mMonitorIn;
+    private ILaunch mLaunch;
     private String mLabel;
     private RemotePort mInStream;
     private RemotePort mOutStream;
@@ -40,7 +47,7 @@ public class CGIProxy extends LaunchWrapperProcess
 
     public CGIProxy(ILaunch fLaunch, String fLabel)
     {
-        super(fLaunch);
+        mLaunch = fLaunch;
 //        setAttribute(ATTR_PROCESS_TYPE, "EpicCGIProxy");
         mIsConnected = false;
         mIsTerminated = false;
@@ -152,6 +159,14 @@ public class CGIProxy extends LaunchWrapperProcess
 	}
 
 	/* (non-Javadoc)
+	 * @see org.eclipse.debug.core.model.IProcess#getLaunch()
+	 */
+	public ILaunch getLaunch()
+	{
+		return mLaunch;
+	}
+
+	/* (non-Javadoc)
 	 * @see org.eclipse.debug.core.model.IProcess#getStreamsProxy()
 	 */
 	public IStreamsProxy getStreamsProxy()
@@ -159,12 +174,74 @@ public class CGIProxy extends LaunchWrapperProcess
 		return mStreamsProxy;
 	}
 
+    /* (non-Javadoc)
+     * @see org.eclipse.debug.core.model.IProcess#setAttribute(java.lang.String, java.lang.String)
+     */
+    public void setAttribute(String key, String value)
+    {
+        ILaunchConfigurationWorkingCopy workingcopy;
+        try
+        {
+            workingcopy = mLaunch.getLaunchConfiguration().getWorkingCopy();
+            workingcopy.setAttribute(key, value);
+            workingcopy.doSave();
+        } catch (CoreException e)
+        {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
+
+    }
+
+    /* (non-Javadoc)
+     * @see org.eclipse.debug.core.model.IProcess#getAttribute(java.lang.String)
+     */
+    public String getAttribute(String key)
+    {
+        try
+        {
+            return mLaunch.getLaunchConfiguration().getAttribute(
+            	key,
+                (String) null);
+        } catch (CoreException e)
+        {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
+        return null;
+    }
+
 	/* (non-Javadoc)
      * @see org.eclipse.debug.core.model.IProcess#getExitValue()
      */
     public int getExitValue() throws DebugException
     {
         return 0;
+    }
+
+	/* (non-Javadoc)
+     * @see org.eclipse.core.runtime.IAdaptable#getAdapter(java.lang.Class)
+     */
+    public Object getAdapter(Class adapter)
+    {
+        if (adapter.equals(IProcess.class))
+        {
+            return this;
+        }
+        if (adapter.equals(IDebugTarget.class))
+        {
+            ILaunch launch = getLaunch();
+            IDebugTarget[] targets = launch.getDebugTargets();
+            for (int i = 0; i < targets.length; i++)
+            {
+                if (this.equals(targets[i].getProcess()))
+                {
+                    return targets[i];
+                }
+            }
+            return null;
+        }
+        return super.getAdapter(adapter);
     }
 
 	/* (non-Javadoc)
