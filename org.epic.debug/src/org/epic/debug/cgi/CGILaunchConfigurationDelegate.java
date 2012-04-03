@@ -1,54 +1,193 @@
 package org.epic.debug.cgi;
 
-import java.io.*;
+import java.io.File;
+import java.io.IOException;
 import java.net.URL;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
 
-import org.eclipse.core.runtime.*;
-import org.eclipse.debug.core.*;
+import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.FileLocator;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Path;
+import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.debug.core.DebugPlugin;
+import org.eclipse.debug.core.ILaunch;
+import org.eclipse.debug.core.ILaunchConfiguration;
 import org.eclipse.debug.core.model.IProcess;
+import org.eclipse.jetty.server.Handler;
+import org.eclipse.jetty.server.handler.HandlerList;
+import org.eclipse.jetty.server.handler.ResourceHandler;
 import org.epic.core.PerlCore;
 import org.epic.core.PerlProject;
 import org.epic.core.util.PerlExecutableUtilities;
-import org.epic.debug.*;
+import org.epic.debug.LaunchConfigurationDelegate;
+import org.epic.debug.PerlDebugPlugin;
+import org.epic.debug.PerlLaunchConfigurationConstants;
+import org.epic.debug.cgi.server.EpicCgiHandler;
 import org.epic.debug.util.RemotePort;
-import org.osgi.framework.Bundle;
+import org.jdom.Document;
+import org.jdom.Element;
+import org.jdom.output.XMLOutputter;
+
+import com.google.common.base.Charsets;
+import com.google.common.base.Joiner;
+import com.google.common.base.Splitter;
+import com.google.common.io.Files;
 
 /**
  * Executes launch configurations of type "Perl CGI".
  */
 public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
 {
-    protected void doLaunch(
-        ILaunchConfiguration configuration,
-        String mode,
-        ILaunch launch,
-        IProgressMonitor monitor) throws CoreException
-    {
-        RemotePort debugPort = createDebugPort(launch);
-        
-        try
-        {            
-            CGIProxy cgiProxy = new CGIProxy(launch, "CGI Process");
-            int brazilPort = RemotePort.findFreePort();
 
-            IProcess process = startBrazil(
-                launch, cgiProxy, brazilPort, debugPort);
-            
-            cgiProxy.waitForConnect();
+    private static final String JETTY_CLASSPATH;
+
+    static
+    {
+        // Statically build the class path component for the jetty command line
+        final String jettyVersion = "7.6.2.v20120308";
+        try
+        {
+            // All the required jars are bundled in the org.epic.lib plugin
+            File libDir = new File(FileLocator.getBundleFile(Platform.getBundle("org.epic.lib")), "lib");
+
+            // Start off with the guava jar for convenience
+            List<String> classpath = new ArrayList<String>();
+            classpath.add(new File(libDir, "guava-11.0.2.jar").getAbsolutePath());
+            classpath.add(new File(libDir, "servlet-api-2.5.jar").getAbsolutePath());
+
+            {
+                final String[] jettyModules = new String[] { "jetty-server", "jetty-http", "jetty-io", "jetty-util",
+                    "jetty-xml", "jetty-security", "jetty-servlet", "jetty-webapp", "jetty-continuation",
+                    "jetty-servlets" };
+
+                for (String module : jettyModules)
+                {
+                    classpath.add(new File(libDir, module + "-" + jettyVersion + ".jar").toString());
+                }
+            }
+
+            // Add ourselves to the classpath, since we define the handler
+            // The complexity here is because the classpath differs depending
+            // on whether we're deployed as a plugin archive
+            {
+                URL binUrl = PerlDebugPlugin.getDefault().getBundle().getEntry("/bin");
+                if (binUrl != null)
+                {
+                    binUrl = FileLocator.resolve(binUrl);
+                    assert binUrl.getProtocol().equalsIgnoreCase("file");
+                    // 'bin' folder exists = we're running inside of
+                    // a hosted workbench
+                    classpath.add(urlToFile(binUrl));
+                }
+                else
+                {
+
+                    URL dirUrl = FileLocator.resolve(PerlDebugPlugin.getDefault().getBundle().getEntry("/"));
+                    if (dirUrl.getProtocol().equalsIgnoreCase("jar"))
+                    {
+                        // org.epic.debug was deployed as a jar; add this jar
+                        // to the classpath
+                        String path = dirUrl.getPath();
+                        assert path.startsWith("file:");
+                        assert path.endsWith(".jar!/");
+                        URL jarUrl = new URL(path.substring(0, path.length() - 2));
+                        classpath.add(urlToFile(jarUrl));
+                    }
+
+                    assert dirUrl.getProtocol().equalsIgnoreCase("file");
+                    // org.epic.debug was deployed as a directory:
+                    // add this directory to the classpath
+                    classpath.add(urlToFile(dirUrl));
+                }
+
+            }
+            JETTY_CLASSPATH = Joiner.on(File.pathSeparator).join(classpath);
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static String urlToFile(URL url)
+    {
+        String urlString = url.toExternalForm();
+
+        if (urlString.matches("^file:/[A-Za-z]:/.*$"))
+        {
+            // Windows URL with volume letter: file:/C:/foo/bar/blah.txt
+            return new File(urlString.substring(6)).getAbsolutePath();
+        }
+        else
+        {
+            // Unix URLs look like this: file:/foo/bar/blah.txt
+            assert urlString.matches("^file:/[^/].*$");
+            return new File(urlString.substring(5)).getAbsolutePath();
+        }
+    }
+
+    protected void doLaunch(ILaunchConfiguration configuration, String mode, ILaunch launch, IProgressMonitor monitor)
+        throws CoreException
+    {
+        RemotePort debugPort = null;
+        if (isDebugMode(launch))
+        {
+            debugPort = new RemotePort("DebugTarget.mDebugPort");
+            debugPort.startConnect();
+        }
+
+        try
+        {
+            IProcess process;
+            CGIProxy cgiProxy = new CGIProxy(launch, "CGI Process");
+            int serverPort = RemotePort.findFreePort();
+
+            // Make sure we have the lock on the proxy
+            synchronized (cgiProxy)
+            {
+                // Launch the proxy listening thread
+                cgiProxy.startListening();
+                // Launch the jetty process which will connect to it
+                process = startJetty(launch, cgiProxy, serverPort, debugPort);
+                try
+                {
+                    // This will release the lock, allowing the cgiProxy
+                    // listening
+                    // thread to acquire it (after the connection occurs)
+                    cgiProxy.wait(30000);
+                }
+                catch (InterruptedException e)
+                {
+                    throw new CoreException(new Status(IStatus.ERROR, PerlDebugPlugin.getUniqueIdentifier(),
+                        IStatus.OK, "CGI proxy did not connect", e));
+                }
+            }
+
             if (!cgiProxy.isConnected())
             {
-                PerlDebugPlugin.getDefault().logError(
-                    "(CGI-Target) Could not connect to CGI-Proxy");
+                PerlDebugPlugin.getDefault().logError("(CGI-Target) Could not connect to CGI-Proxy");
                 launch.terminate();
                 return;
             }
             launch.addProcess(cgiProxy);
-            
-            openBrowser(launch, brazilPort);
-            
+
+            openBrowser(launch, serverPort);
+
             if (debugPort != null)
-                createCGIDebugTarget(launch, process, debugPort);
+            {
+                if (debugPort.waitForConnect(false) != RemotePort.WAIT_OK)
+                {
+                    PerlDebugPlugin.errorDialog("Could not connect to debug port!");
+                    debugPort.shutdown();
+                    launch.terminate();
+                    return;
+                }
+                launch.addDebugTarget(new CGIDebugTarget(launch, process, debugPort, getPathMapper(launch)));
+            }
         }
         catch (CoreException e)
         {
@@ -57,369 +196,232 @@ public class CGILaunchConfigurationDelegate extends LaunchConfigurationDelegate
             throw e;
         }
     }
-    
-    private BrazilProps createBrazilProps(
-        ILaunch launch,
-        CGIProxy cgiProxy,
-        int brazilPort,
-        int debugPort) throws CoreException
+
+    private String getLaunchAttribute(ILaunch launch, String attrName, boolean isPath) throws CoreException
     {
-        String htmlRootDir = getLaunchAttribute(launch,
-            PerlLaunchConfigurationConstants.ATTR_HTML_ROOT_DIR, true);
-
-        String cgiRootDir = getLaunchAttribute(launch,
-            PerlLaunchConfigurationConstants.ATTR_CGI_ROOT_DIR, true);
-                    
-        String cgiFileExtension = getLaunchAttribute(launch,
-            PerlLaunchConfigurationConstants.ATTR_CGI_FILE_EXTENSION, false);
-        
-        String perlParams = getLaunchAttribute(launch,
-            PerlLaunchConfigurationConstants.ATTR_PERL_PARAMETERS, false);
-        if (perlParams == null) perlParams = "";
-        perlParams = perlParams.replaceAll("[\\n\\r]", " ");
-        
-        PerlProject project = PerlCore.create(getProject(launch));
-
-        String perlPath = PerlExecutableUtilities.getPerlInterpreterPath();
-        if (perlPath == null) perlPath = ""; // TODO report an error?
-
-        BrazilProps props = new BrazilProps();
-
-        props.add("cgi.InPort", cgiProxy.getInPort());
-        props.add("cgi.OutPort", cgiProxy.getOutPort());
-        props.add("cgi.ErrorPort", cgiProxy.getErrorPort());
-        props.add("cgi.Debug", isDebugMode(launch));
-        props.add("root", htmlRootDir);
-        props.add("port", brazilPort);
-        props.add("cgi.root", cgiRootDir);
-        props.add("cgi.executable", perlPath);
-        props.add("cgi.suffix", cgiFileExtension);
-        props.add("cgi.PerlParams", perlParams);
-        props.add("cgi.DebugInclude", "-I" + PerlDebugPlugin.getDefault().getInternalDebugInc());
-        props.add("cgi.RunInclude", PerlExecutableUtilities.getPerlIncArgs(project));        
-
-        String[] env = PerlDebugPlugin.getDebugEnv(launch, debugPort);
-        for (int i = 0; i < env.length; i++)
-        {
-            int j = env[i].indexOf('=');
-            if (j > 0) props.add(
-                "cgi.ENV_" + env[i].substring(0,j),
-                env[i].substring(j+1));
-        }
-        
-        return props;    
+        return getLaunchAttribute(launch, attrName, isPath, null);
     }
-    
-    private void createCGIDebugTarget(
-        ILaunch launch, IProcess process, RemotePort debugPort)
+
+    private String getLaunchAttribute(ILaunch launch, String attrName, boolean isPath, String defaultValue)
         throws CoreException
     {
-        if (debugPort.waitForConnect(false) != RemotePort.WAIT_OK)
+        String attrValue = launch.getLaunchConfiguration().getAttribute(attrName, (String) null);
+        if (attrValue == null)
         {
-            PerlDebugPlugin.errorDialog("Could not connect to debug port!");
-            debugPort.shutdown();
-            launch.terminate();
-            return;
+            attrValue = defaultValue;
         }
-        else
-        {
-            CGIDebugTarget target = new CGIDebugTarget(
-                launch, process, debugPort, getPathMapper(launch));
 
-            launch.addDebugTarget(target);
-        }
-    }
-    
-    private RemotePort createDebugPort(ILaunch launch)
-    {
-        if (!isDebugMode(launch)) return null;
-        
-        RemotePort debugPort = new RemotePort("DebugTarget.mDebugPort");
-        debugPort.startConnect();
-        return debugPort;
-    }
-    
-    /**
-     * @return a List of Files representing entries of the classpath
-     *         passed to the Brazil (web server) JVM
-     */
-    private List getBrazilJVMClasspath() throws CoreException
-    {
-        try
+        if (isPath)
         {
-            List cp = new ArrayList();
-            
-            URL brazilUrl = Platform.resolve(Platform.getBundle("org.epic.lib")
-                .getEntry("/lib/brazil_mini.jar"));
-            
-            assert "file".equalsIgnoreCase(brazilUrl.getProtocol()) :
-                "brazil_mini.jar must reside in the file system";
-            
-            cp.add(urlToFile(brazilUrl));
-            
-            Bundle bundle = PerlDebugPlugin.getDefault().getBundle();
-            URL binUrl = bundle.getEntry("/bin");
-            
-            if (binUrl != null)
-            {
-                binUrl = Platform.resolve(binUrl);
-                assert binUrl.getProtocol().equalsIgnoreCase("file");
-    
-                // 'bin' folder exists = we're running inside of
-                // a hosted workbench 
-    
-                cp.add(urlToFile(binUrl));
-            }
-            else
-            {
-                URL dirUrl = Platform.resolve(bundle.getEntry("/"));
-                
-                if (dirUrl.getProtocol().equalsIgnoreCase("jar"))
-                {
-                    // org.epic.debug was deployed as a jar; add this jar
-                    // to the classpath
-                    
-                    String path = dirUrl.getPath();
-                    assert path.startsWith("file:");
-                    assert path.endsWith(".jar!/");
-                    
-                    URL jarUrl = new URL(path.substring(0, path.length()-2));
-                    cp.add(urlToFile(jarUrl));                
-                }
-                else
-                {   
-                    assert dirUrl.getProtocol().equalsIgnoreCase("file");
-                    
-                    // org.epic.debug was deployed as a directory:
-                    // add this directory to the classpath
-                    
-                    cp.add(urlToFile(dirUrl));
-                }
-            }
-            return cp;
+            attrValue = new Path(attrValue).toString();
         }
-        catch (Exception e)
-        {
-            throw new CoreException(new Status(
-                IStatus.ERROR,
-                PerlDebugPlugin.getUniqueIdentifier(),
-                IStatus.OK,
-                "getBrazilJVMClasspath failed",
-                e));
-        }
+
+        return attrValue;
     }
-    
-    private String getLaunchAttribute(
-        ILaunch launch, String attrName, boolean isPath)
-        throws CoreException
-    {
-        String attrValue = launch.getLaunchConfiguration().getAttribute(
-            attrName, (String) null);
-        
-        if (attrValue == null) return null;        
-        else return new Path(attrValue).toString();
-    }
-    
+
     private String getRelativeURL(ILaunch launch) throws CoreException
     {
-        String htmlRootFile = getLaunchAttribute(launch,
-            PerlLaunchConfigurationConstants.ATTR_HTML_ROOT_FILE, true);
-        
-        String htmlRootDir = getLaunchAttribute(launch,
-            PerlLaunchConfigurationConstants.ATTR_HTML_ROOT_DIR, true);
-        
-        return
-            new Path(htmlRootFile)
-                .setDevice(null)
-                .removeFirstSegments(new Path(htmlRootDir).segments().length)
-                .toString();
+        String htmlRootFile = getLaunchAttribute(launch, PerlLaunchConfigurationConstants.ATTR_HTML_ROOT_FILE, true);
+
+        String htmlRootDir = getLaunchAttribute(launch, PerlLaunchConfigurationConstants.ATTR_HTML_ROOT_DIR, true);
+
+        return new Path(htmlRootFile).setDevice(null).removeFirstSegments(new Path(htmlRootDir).segments().length)
+            .toString();
     }
 
-    /**
-     * @param path a list of File objects representing paths
-     * @return a string with absolute paths separated by
-     *         the platform-specific path separator
-     */
-    private static String makePathString(List path)
-    {
-        StringBuffer buf = new StringBuffer();
-        for (Iterator i = path.iterator(); i.hasNext();)
-        {
-            File entry = (File) i.next();
-            if (buf.length() > 0) buf.append(File.pathSeparator);
-            buf.append(entry.getAbsolutePath());
-        }
-        return buf.toString();
-    }
-    
-    private void openBrowser(ILaunch launch, int httpPort)
-        throws CoreException
+    private void openBrowser(ILaunch launch, int httpPort) throws CoreException
     {
         try
         {
-            CGIBrowser browser = new CGIBrowser(
-                launch, getRelativeURL(launch), httpPort);
+            CGIBrowser browser = new CGIBrowser(launch, getRelativeURL(launch), httpPort);
             browser.open();
         }
         catch (CoreException e)
         {
-            PerlDebugPlugin.getDefault().logError(
-                "Could not start web browser for CGI debugging.",
-                e);
+            PerlDebugPlugin.getDefault().logError("Could not start web browser for CGI debugging.", e);
             throw e;
         }
     }
-    
-    private IProcess startBrazil(
-        ILaunch launch,
-        CGIProxy cgiProxy,
-        int brazilPort,
-        RemotePort debugPort) throws CoreException
+
+    @SuppressWarnings("unchecked")
+    private File buildJettyConfig(ILaunch launch, CGIProxy cgiProxy, int webServerPort, RemotePort debugPort)
+        throws CoreException, IOException
     {
+        Element configure = new Element("Configure");
+        configure.setAttribute("class", "org.eclipse.jetty.server.Server");
+        Document doc = new Document(configure);
+
+        // Connectors
+        configure.addContent(new Element("Call").setAttribute("name", "addConnector").addContent(
+            new Element("Arg").addContent(new Element("New").setAttribute("class",
+                "org.eclipse.jetty.server.nio.SelectChannelConnector").addContent(
+                new Element("Set").setAttribute("name", "port").setText(Integer.toString(webServerPort))))));
+
+        // Handlers
+        configure.addContent(new Element("Set").setAttribute("name", "handler").addContent(
+            new Element("New").setAttribute("class", HandlerList.class.getName()).addContent(
+                new Element("Set").setAttribute("name", "handlers").addContent(
+                    new Element("Array")
+                        .setAttribute("type", Handler.class.getName())
+                        .addContent(
+                            new Element("Item").addContent(new Element("New").setAttribute("id", "cgiHandler")
+                                .setAttribute("class", EpicCgiHandler.class.getName())))
+                        .addContent(
+                            new Element("Item").addContent(new Element("New").setAttribute("id", "resourceHandler")
+                                .setAttribute("class", ResourceHandler.class.getName())))))));
+
+        // CGI Handler config
+        {
+            Element handler = new Element("Ref").setAttribute("id", "cgiHandler");
+            configure.addContent(handler);
+
+            // Ports
+            handler.addContent(new Element("Set").setAttribute("name", "portIn").setText(
+                Integer.toString(cgiProxy.getInPort())));
+            handler.addContent(new Element("Set").setAttribute("name", "portOut").setText(
+                Integer.toString(cgiProxy.getOutPort())));
+            handler.addContent(new Element("Set").setAttribute("name", "portError").setText(
+                Integer.toString(cgiProxy.getErrorPort())));
+
+            // Perl executable
+            handler.addContent(new Element("Set").setAttribute("name", "perlExecutable").setText(
+                PerlExecutableUtilities.getPerlInterpreterPath()));
+
+            // Perl params
+            {
+                String perlParams = getLaunchAttribute(launch, PerlLaunchConfigurationConstants.ATTR_PERL_PARAMETERS,
+                    false);
+                if (perlParams == null) perlParams = "";
+                perlParams = perlParams.replaceAll("[\\n\\r]", " ");
+                handler.addContent(new Element("Set").setAttribute("name", "perlParams").setText(perlParams));
+            }
+
+            // Perl includes
+            {
+                PerlProject project = PerlCore.create(getProject(launch));
+
+                Element includes;
+                handler.addContent(new Element("Set").setAttribute("name", "runIncludes").addContent(
+                    includes = new Element("Array").setAttribute("type", String.class.getName())));
+
+                for (String include : (List<String>) PerlExecutableUtilities.getPerlIncArgs(project))
+                {
+                    includes.addContent(new Element("Item").setText(include));
+                }
+            }
+
+            // Perl debug includes
+            if (isDebugMode(launch))
+            {
+                handler.addContent(new Element("Set").setAttribute("name", "debugIncludes").addContent(
+                    new Element("Array").setAttribute("type", String.class.getName()).addContent(
+                        new Element("Item").setText(PerlDebugPlugin.getDefault().getInternalDebugInc().trim()))));
+            }
+
+            // CGI root directory
+            handler.addContent(new Element("Set").setAttribute("name", "cgiRoot").setText(
+                getLaunchAttribute(launch, PerlLaunchConfigurationConstants.ATTR_CGI_ROOT_DIR, true)));
+
+            // CGI URL prefix
+            handler.addContent(new Element("Set").setAttribute("name", "prefix").setText("/")); // "/cgi-bin"?
+
+            // CGI suffixes
+            {
+                Element suffixes;
+
+                handler.addContent(new Element("Set").setAttribute("name", "suffixes").addContent(
+                    suffixes = new Element("Array").setAttribute("type", String.class.getName())));
+
+                String suffixesString = getLaunchAttribute(launch,
+                    PerlLaunchConfigurationConstants.ATTR_CGI_FILE_EXTENSION, false);
+                for (String suffix : Splitter.on(",").trimResults().split(suffixesString))
+                {
+                    suffixes.addContent(new Element("Item").setText(suffix));
+                }
+            }
+
+            // Perl runtime environment
+            {
+                Element envMap;
+                handler.addContent(new Element("Set").setAttribute("name", "perlEnv").addContent(
+                    envMap = new Element("Map")));
+
+                String[] envs = PerlDebugPlugin.getDebugEnv(launch, debugPort != null ? debugPort.getServerPort() : -1);
+                for (String env : envs)
+                {
+                    int j = env.indexOf('=');
+                    if (j <= 0)
+                    {
+                        continue;
+                    }
+
+                    envMap.addContent(new Element("Entry").addContent(new Element("Item").setText(env.substring(0, j)))
+                        .addContent(new Element("Item").setText(env.substring(j + 1))));
+                }
+            }
+
+            // Trigger the connection to the proxy
+            handler.addContent(new Element("Call").setAttribute("name", "init"));
+        }
+
+        // Resource handler configurations
+        {
+            Element resourceHandler = new Element("Ref").setAttribute("id", "resourceHandler");
+            configure.addContent(resourceHandler);
+
+            String htmlRootDir = getLaunchAttribute(launch, PerlLaunchConfigurationConstants.ATTR_HTML_ROOT_DIR, true);
+            htmlRootDir = "file:/" + new File(htmlRootDir).getAbsolutePath().replaceAll("\\\\", "/");
+            resourceHandler.addContent(new Element("Set").setAttribute("name", "resourceBase").setText(htmlRootDir));
+            resourceHandler.addContent(new Element("Set").setAttribute("name", "directoriesListed").setText("true"));
+        }
+
+        File xmlFile = new File("/var/cgi/jetty.xml");
+        // File xmlFile = File.createTempFile("jetty-cgi", "xml");
+        Files.write(new XMLOutputter().outputString(doc), xmlFile, Charsets.UTF_8);
+        return xmlFile;
+    }
+
+    private IProcess startJetty(ILaunch launch, CGIProxy cgiProxy, int webServerPort, RemotePort debugPort)
+        throws CoreException
+    {
+
+        File xmlConfig;
         try
         {
-            createBrazilProps(
-                launch,
-                cgiProxy,
-                brazilPort,
-                debugPort != null ? debugPort.getServerPort() : -1
-                ).save();
+            xmlConfig = buildJettyConfig(launch, cgiProxy, webServerPort, debugPort);
         }
-        catch (CoreException e)
+        catch (RuntimeException e)
         {
-            PerlDebugPlugin.getDefault().logError(
-                "Could not read launch configuration attributes.",
-                e);
             throw e;
         }
-        catch (IOException e)
+        catch (Exception e)
         {
-            throw new CoreException(new Status(
-                IStatus.ERROR,
-                PerlDebugPlugin.getUniqueIdentifier(),
-                IStatus.OK,
-                "Could not create configuration file for web server.",
-                e));
-        }
-        
-        Process brazilProcess;
-        try { brazilProcess = startBrazilProcess(); }
-        catch (CoreException e)
-        {
-            PerlDebugPlugin.getDefault().logError(
-                "Could not start web server", e);
-            throw e;
+            throw new CoreException(new Status(IStatus.ERROR, PerlDebugPlugin.getUniqueIdentifier(), IStatus.OK,
+                "Could not create configuration file for web server.", e));
         }
 
-        return DebugPlugin.newProcess(launch, brazilProcess, "Web Server");
-    }
-    
-    private Process startBrazilProcess() throws CoreException
-    {
-        String javaExec =
-            System.getProperty("java.home") +
-            File.separator +
-            "bin" +
-            File.separator +
-            "java";
-        File workingDir =
-            PerlDebugPlugin.getDefault().getStateLocation().toFile();
-
-        String[] cmdParams = {
-            javaExec,
-            "-classpath",
-            makePathString(getBrazilJVMClasspath()),
-            "sunlabs.brazil.server.Main",
-            "-c",
-            "brazil.cfg" };
-        
+        List<String> commandLine = new ArrayList<String>();
+        commandLine.add(System.getProperty("java.home") + File.separator + "bin" + File.separator + "java");
+        commandLine.add("-cp");
+        commandLine.add(JETTY_CLASSPATH);
+        commandLine.add("org.eclipse.jetty.xml.XmlConfiguration");
+        commandLine.add(xmlConfig.getAbsolutePath());
+        Process jettyProcess;
         try
         {
-            return
-                Runtime.getRuntime().exec(cmdParams, null, workingDir);
+            jettyProcess = new ProcessBuilder(commandLine).directory(
+                PerlDebugPlugin.getDefault().getStateLocation().toFile()).start();
         }
-        catch (IOException e)
+        catch (RuntimeException e)
         {
-            throw new CoreException(new Status(
-                IStatus.ERROR,
-                PerlDebugPlugin.getUniqueIdentifier(),
-                IStatus.OK,
-                "Could not start embedded web server: Runtime.exec failed",
-                e));
+            throw e;
         }
-    }
-    
-    private File urlToFile(URL url)
-    {
-        String urlString = url.toExternalForm();
-        
-        if (urlString.matches("^file:/[A-Za-z]:/.*$"))
+        catch (Exception e)
         {
-            // Windows URL with volume letter: file:/C:/foo/bar/blah.txt
-            return new File(urlString.substring(6));
+            throw new CoreException(new Status(IStatus.ERROR, PerlDebugPlugin.getUniqueIdentifier(), IStatus.OK,
+                "Could not start embedded web server: Runtime.exec failed", e));
         }
-        else
-        {
-            // Unix URLs look like this: file:/foo/bar/blah.txt
-            assert urlString.matches("^file:/[^/].*$");
-            return new File(urlString.substring(5));
-        }
-    }
 
-    private static class BrazilProps
-    {
-        private final Properties props;
-        
-        public BrazilProps()
-        {
-            props = new Properties();                        
-        }
-        
-        public void add(String name, boolean value)
-        {
-            add(name, String.valueOf(value));
-        }
-        
-        public void add(String name, int value)
-        {
-            add(name, String.valueOf(value));
-        }
-        
-        public void add(String name, List values)
-        {
-            int j = 0;
-            for (Iterator i = values.iterator(); i.hasNext(); j++)
-                add(name + "[" + j + "]", i.next().toString());
-        }
-        
-        public void add(String name, String value)
-        {
-            props.put(name, value);
-        }
-        
-        public void save() throws IOException
-        {
-            File propsFile = PerlDebugPlugin.getDefault().extractTempFile(
-                "brazil_cgi_templ.cfg",
-                "brazil.cfg");
-            
-            // Append custom properties:
-
-            OutputStream out = null;            
-            try
-            {
-                out = new FileOutputStream(propsFile, true);
-                props.store(out, null);
-            }
-            finally
-            {
-                if (out != null) try { out.close(); } catch (Exception e) { }
-            }
-        }
-        
-        public String toString()
-        {
-            return props.toString();
-        }
+        return DebugPlugin.newProcess(launch, jettyProcess, "Web Server");
     }
 }

@@ -1,482 +1,396 @@
-/*
- * CgiHandler.java
- *
- * Brazil project web application toolkit,
- * export version: 2.0
- * Copyright (c) 1998-2002 Sun Microsystems, Inc.
- *
- * Sun Public License Notice
- *
- * The contents of this file are subject to the Sun Public License Version
- * 1.0 (the "License"). You may not use this file except in compliance with
- * the License. A copy of the License is included as the file "license.terms",
- * and also available at http://www.sun.com/
- *
- * The Original Code is from:
- *    Brazil project web application toolkit release 2.0.
- * The Initial Developer of the Original Code is: suhler.
- * Portions created by suhler are Copyright (C) Sun Microsystems, Inc.
- * All Rights Reserved.
- *
- * Contributor(s): cstevens, drach, suhler.
- *
- * Version:  1.22
- * Created by suhler on 98/09/14
- * Last modified by suhler on 02/05/02 11:15:33
- */
-
 package org.epic.debug.cgi.server;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.io.Writer;
 import java.net.Socket;
 import java.net.UnknownHostException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.eclipse.jetty.http.HttpHeaders;
+import org.eclipse.jetty.http.HttpMethods;
+import org.eclipse.jetty.http.MimeTypes;
+import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.server.Response;
+import org.eclipse.jetty.util.log.Logger;
 import org.epic.debug.util.ExecutionArguments;
 
-import sunlabs.brazil.server.*;
+import com.google.common.base.Charsets;
+import com.google.common.base.Joiner;
+import com.google.common.base.Predicate;
+import com.google.common.base.Splitter;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Maps;
 
-/**
- * Handler for implementing cgi/1.1 interface. This implementation allows either
- * suffix matching (e.g. .cgi) to identify cgi scripts, or prefix matching (e.g.
- * /cgi-bin). Defaults to "/". All output from the cgi script is buffered (e.g.
- * chunked encoding is not supported). <br>
- * NOTE: in versions of Java prior to release 1.3, the ability to set a working
- * directory when running an external process is missing. This handler
- * automatically checks for this ability and sets the proper working directory,
- * but only if the underlying VM supports it.
- * <p>
- * The following request properties are used:
- * <dl class=props>
- * <dt>root
- * <dd>The document root for cgi files
- * <dt>suffix
- * <dd>The suffix for cgi files (defaults to .cgi)
- * <dt>prefix
- * <dd>The prefix for all cgi files (e.g. /cgi-bin)
- * <dt>custom
- * <dd>set to "true" to enable custom environment variables. If set, all server
- * properties starting with this handler's prefix are placed into the
- * environment with the name: <code>CONFIG_<i>name</i></code>, where
- * <i>name </i> is the property key, in upper case, with the prefix removed.
- * This allows cgi scripts to be customized in the server's configuration file.
- * </dl>
- * 
- * @author Stephen Uhler
- * @version 1.22, 02/05/02
- */
-public class EpicCgiHandler implements Handler
+public class EpicCgiHandler extends org.eclipse.jetty.server.handler.AbstractHandler
 {
-    private static final Object LOCK = new Object();
-    
-    private static final String ROOT = "root"; // property for document root
-    private static final String SUFFIX = "suffix"; // property for suffix string    
-    private static final String PREFIX = "prefix"; // all cgi scripts must start with this
-    private static final String CUSTOM = "custom"; // add custom query variables
 
-    private static final String ENV = "ENV";
+    private static final Logger LOG = org.eclipse.jetty.util.log.Log.getLogger(EpicCgiHandler.class.getName());
 
-    private static String software = "Mini Java CgiHandler 0.2";
-    private static Hashtable envMap; // environ maps
-    
-    private CGIConfig config;
+    private Socket diagSocket = null;
+    private Socket outSocket = null;
+    private Socket errorSocket = null;
+    private PrintWriter mDiag;
+    private Writer mOut; // forwards CGI stdout to CGI proxy
+    private PrintWriter mError; // forwards CGI stderr to CGI proxy
 
-	private Socket diagSocket;
-	private Socket outSocket;
-	private Socket errorSocket;
-    
-    private PrintWriter mDiag; // diagnostic info to CGI proxy
-    private OutputStream mOut; // forwards CGI stdout to CGI proxy
-    private OutputStream mError; // forwards CGI stderr to CGI proxy
-    private Exception defaultEnvError;
+    private int portIn;
+    private int portOut;
+    private int portError;
 
-	/**
-	 * construct table of CGI environment variables that need special handling
-	 */
-	static
-    {
-		envMap = new Hashtable(2);
-		envMap.put("content-length", "CONTENT_LENGTH");
-		envMap.put("content-type", "CONTENT_TYPE");
-	}
+    private String perlExecutable;
+    private String perlParams;
+    private String[] runIncludes = {};
+    private String[] debugIncludes = {};
+    private String cgiRoot;
+    private String prefix;
+    private Map<String, String> perlEnv = new HashMap<String, String>();
+    private Set<String> suffixes = new HashSet<String>();
 
-	public EpicCgiHandler()
-    {
-	}
-
-	/**
-	 * One time initialization. The handler configuration properties are
-	 * extracted and set in {@link #respond(Request)}to allow upstream handlers
-	 * to modify the parameters.
-	 */
-	public boolean init(Server server, String prefix)
-    {
-        config = new CGIConfig(server, prefix);
-
-        return connectToCGIProxy();
-	}
-
-	/**
-	 * Dispatch and handle the CGI request. Gets called on ALL requests. Set up
-	 * the environment, exec the process, and deal appropriately with the input
-	 * and output.
-	 * 
-	 * In this implementation, all cgi script files must end with a standard
-	 * suffix, although the suffix may omitted from the url. The url
-	 * /main/do/me/too?a=b will look, starting in DocRoot, for main.cgi,
-	 * main/do.cgi, etc until a matching file is found.
-	 * <p>
-	 * Input parameters examined in the request properties:
-	 * <dl>
-	 * <dt>Suffix
-	 * <dd>The suffix for all cgi scripts (defaults to .cgi)
-	 * <dt>DocRoot
-	 * <dd>The document root, for locating the script.
-	 * </dl>
-	 */
-	public boolean respond(Request request)
-    {
-        // The current implementation of EPIC debugger cannot reliably
-        // process concurrent debug connections. Therefore, we serialise
-        // processing of CGI requests at the web server level (LOCK).
-
-        synchronized (LOCK)
-        {
-            return respondImpl(request);
-        }
-    }
-    
-    private boolean respondImpl(Request request)
-    {
-		String url = request.props.getProperty("url.orig", request.url);
-		String prefix = config.getRequestProperty(request, PREFIX, "/");
-
-		if (!url.startsWith(prefix)) return false;
-        if (url.endsWith("favicon.ico")) return false;
-
-		String suffixes = config.getRequestProperty(request, SUFFIX, ".cgi");
-		String root = config.getRequestProperty(
-            request, ROOT, request.props.getProperty(ROOT, "."));
-
-		request.log(
-            Server.LOG_DIAGNOSTIC,
-            "suffix=" + suffixes + 
-            " root=" + root +
-            " url: " + url);
-        
-        File cgiFile;
-        int pathInfoStartI;        
-        {
-            Object[] ret = findCGIFile(request, url, suffixes, root);
-            if (ret == null) return false;
-            cgiFile = (File) ret[0];
-            pathInfoStartI = ((Integer) ret[1]).intValue();
-        }
-
-		String[] command = createCommandLine(request, cgiFile);
-        String[] env = createEnvironment(
-            request, cgiFile, root, url, pathInfoStartI);
-
-        execCGI(request, cgiFile, command, env);
-		return true;
-	}
-    
-    /**
-     * Opens communication channels to the EPIC CGI proxy running
-     * inside of the Eclipse JVM. The script output and diagnostic
-     * information are forwarded to this proxy.
-     */
-    private boolean connectToCGIProxy()
+    public void init()
     {
         try
         {
-            diagSocket = new Socket("localhost", config.getDiagPort());
-            outSocket = new Socket("localhost", config.getOutPort());
-            errorSocket = new Socket("localhost", config.getErrorPort());
+            // Connect to the CGI proxy
+            diagSocket = new Socket("localhost", portIn);
+            outSocket = new Socket("localhost", portOut);
+            errorSocket = new Socket("localhost", portError);
 
-            mError = errorSocket.getOutputStream();
-            mOut = outSocket.getOutputStream();
+            mError = new PrintWriter(errorSocket.getOutputStream());
+            mOut = new OutputStreamWriter(outSocket.getOutputStream());
             mDiag = new PrintWriter(diagSocket.getOutputStream(), true);
-            
-            if (defaultEnvError != null)
-            {
-                mDiag.println("Failed to retrieve global environment variables:");
-                defaultEnvError.printStackTrace(mDiag);
-                mDiag.println("CGI scripts might not be executed properly.");
-            }
         }
         catch (UnknownHostException e)
         {
-            // TODO: can this ever happen? will anyone see the error message?
-            e.printStackTrace();
-            return false;
+            throw new RuntimeException(e);
         }
         catch (IOException e)
         {
-            // TODO: can this ever happen? will anyone see the error message?
-            e.printStackTrace();
-            return false;
+            throw new RuntimeException(e);
         }
-        return true;
     }
-    
-    /**
-     * @return the command line used to execute the CGI script
-     */
-    private String[] createCommandLine(Request request, File cgiFile)
-    {
-        //Get Perl executable and generate comand array
-        ArrayList commandList = new ArrayList();
-        commandList.add(config.getPerlExecutable());
-        
-        // Add absolute path to local working directory to make
-        // perl -d refer to modules in the same directory by their
-        // absolute rather than relative paths (relevant when setting
-        // breakpoints).
-        //
-        // TODO: Cygwin path translation is missing here, this might
-        // cause problems; compare to LocalLaunchConfigurationDelegate
-        commandList.add("-I" +
-            cgiFile.getParentFile().getAbsolutePath().replace('\\', '/'));
-        
-        commandList.addAll(config.getRunInclude());
 
-        if (config.getDebugMode())
+    @Override
+    public void handle(String target, Request baseRequest, HttpServletRequest request, HttpServletResponse response)
+        throws IOException, ServletException
+    {
+        // The current implementation of EPIC debugger cannot reliably
+        // process concurrent debug connections. Therefore, we serialize
+        // processing of CGI requests at the web server level (LOCK).
+        synchronized (this)
         {
-            commandList.add(config.getDebugInclude());
+            String url = baseRequest.getRequestURI();
+            if (prefix != null && !url.startsWith(prefix)) return;
+            String cgiUrl = url.substring(prefix.length());
+            LOG.info(request.getRequestURL().toString());
+
+            LinkedList<String> urlParts = new LinkedList<String>();
+            Iterables.addAll(urlParts, Splitter.on("/").split(cgiUrl));
+            File cgiFile = findCgiFile(urlParts);
+            if (null == cgiFile)
+            {
+                return;
+            }
+
+            LOG.info(cgiFile.getAbsolutePath());
+            String pathInfo = urlParts.isEmpty() ? "" : "/" + Joiner.on('/').join(urlParts);
+            LOG.info("path info: " + pathInfo);
+            String originalScriptPath = url.substring(0, url.length() - pathInfo.length());
+            LOG.info("original:" + originalScriptPath);
+
+            // //-------------------Environment Variables-------------------
+            // //PATH_INFO=/bar/baz
+            // //SCRIPT_NAME=/foo.cgi
+            // //PATH_TRANSLATED=/rhel5pdi/home/bradd/workspace/_scratch_perl/cgi//bar/baz
+            // //QUERY_STRING=x=y
+            // //QUERY_STRING=
+            // //SERVER_URL=http://localhost:5005
+            //
+            // response.setContentType("text/html;charset=utf-8");
+            // response.setStatus(HttpServletResponse.SC_OK);
+            // baseRequest.setHandled(true);
+            // response.getWriter().println("<h1>" + cgiFile.getAbsolutePath() +
+            // "</h1>");
+
+            diagLine("***********************************************************");
+            diagLine("Requested URI: " + request.getRequestURL());
+
+            ProcessBuilder pb = new ProcessBuilder(createCommandLine(cgiFile));
+            Map<String, String> env = createEnvironment(request, originalScriptPath, pathInfo);
+            env = Maps.filterEntries(env, new Predicate<Map.Entry<String, String>>()
+            {
+                @Override
+                public boolean apply(Entry<String, String> input)
+                {
+                    return null != input.getValue();
+                }
+
+            });
+            pb.environment().putAll(env);
+            pb.directory(new File(cgiFile.getParentFile().getCanonicalPath()));
+            baseRequest.setHandled(true);
+            execCGI(pb, baseRequest);
+        }
+    }
+
+    //
+    // public static String getPostData(HttpServletRequest req) {
+    // StringBuilder sb = new StringBuilder();
+    // try {
+    // BufferedReader reader = req.getReader();
+    // reader.mark(10000);
+    //
+    // String line;
+    // do {
+    // line = reader.readLine();
+    // sb.append(line).append("\n");
+    // } while (line != null);
+    // reader.reset();
+    // // do NOT close the reader here, or you won't be able to get the post
+    // data twice
+    // } catch(IOException e) {
+    // logger.warn("getPostData couldn't.. get the post data", e); // This has
+    // happened if the request's reader is closed
+    // }
+    //
+    // return sb.toString();
+    // }
+
+    @SuppressWarnings("unchecked")
+    private String[] createCommandLine(File cgiFile)
+    {
+        // Get Perl executable and generate comand array
+        List<String> commandList = new ArrayList<String>();
+        commandList.add(this.perlExecutable);
+
+        // Includes
+        commandList.add("-I" + cgiFile.getParentFile().getAbsolutePath().replace('\\', '/'));
+        if (null != this.runIncludes)
+        {
+            for (String include : this.runIncludes)
+            {
+                commandList.add("-I" + include);
+            }
+        }
+
+        if (null != this.debugIncludes && this.debugIncludes.length != 0)
+        {
+            for (String include : this.debugIncludes)
+            {
+                commandList.add("-I" + include);
+            }
             commandList.add("-d"); // Add debug switch
         }
-        
-        String perlParams = config.getPerlParams(); 
+
         if (perlParams != null && perlParams.length() > 0)
         {
             ExecutionArguments exArgs = new ExecutionArguments(perlParams);
             commandList.addAll(exArgs.getProgramArgumentsL());
         }
 
-        try { commandList.add(cgiFile.getCanonicalPath()); }
-        catch (IOException e) { commandList.add(cgiFile.getAbsolutePath()); }
+        // The actual CGI to execute
+        commandList.add(cgiFile.getAbsolutePath());
 
-        // Look at the query and check for an =
-        // If no '=', then use '+' as an argument delimiter
+        // // Look at the query and check for an =
+        // // If no '=', then use '+' as an argument delimiter
+        // if (request.query.indexOf("=") == -1)
+        // commandList.add(request.query);
 
-        if (request.query.indexOf("=") == -1)
-            commandList.add(request.query);
-
-        String[] command =
-            (String[]) commandList.toArray(new String[commandList.size()]);
-
-        /*
-        for (int i = 0; i < command.length; i++)
-            request.log(
-                Server.LOG_DIAGNOSTIC,
-                "command[" + i + "]= " + command[i]);
-        */
+        String[] command = commandList.toArray(new String[] {});
+        diagLine("---------------------CGI Command Line----------------------");
+        for (String part : command)
+            diagLine(part);
         return command;
     }
-    
+
     /**
      * @return the environment passed to the executed CGI script
      */
-    private String[] createEnvironment(
-        Request request,
-        File cgiFile,
-        String root,
-        String url,
-        int pathInfoStartI)
+    private Map<String, String> createEnvironment(HttpServletRequest request, String cgiPath, String pathInfo)
     {
-        List env = new ArrayList();
+        Map<String, String> env = new TreeMap<String, String>(this.perlEnv);
 
-        /*
-         * Build the environment array. First, get all the http headers most
-         * are transferred directly to the environment, some are handled
-         * specially. Multiple headers with the same name are not handled
-         * properly.
-         */
-        Enumeration keys = request.headers.keys();
-        while (keys.hasMoreElements())
+        @SuppressWarnings("unchecked")
+        Enumeration<String> headerNames = request.getHeaderNames();
+
+        while (headerNames.hasMoreElements())
         {
-            String key = (String) keys.nextElement();
-            String special = (String) envMap.get(key.toLowerCase());
-            if (special != null)
-                env.add(special + "=" + request.headers.get(key));
-            else env.add(
-                "HTTP_" + key.toUpperCase().replace('-', '_') + "=" +
-                request.headers.get(key));
+            String headerName = headerNames.nextElement();
+            if (HttpHeaders.CONTENT_TYPE.equals(headerName))
+            {
+                env.put("CONTENT_TYPE", request.getHeader(HttpHeaders.CONTENT_TYPE));
+            }
+            else if (HttpHeaders.CONTENT_LENGTH.equals(headerName))
+            {
+                env.put("CONTENT_LENGTH", request.getHeader(HttpHeaders.CONTENT_LENGTH));
+            }
+            else
+            {
+                env.put(headerName, request.getHeader(headerName));
+            }
         }
+
+        // Ex:
+        // prefix = /cgi-bin
+        // root = /var/cgi-bin
+        // suffixes = [ 'cgi' ]
+        // cgi file = foo.cgi (in root)
+        // incoming url = http://localhost:8118/cgi-bin/foo/bar/baz
+
+        // SCRIPT_NAME=/foo
+        env.put("SCRIPT_NAME", cgiPath);
+        // PATH_TRANSLATED=/var/cgi-bin/bar/baz?x=y
+        env.put("PATH_TRANSLATED", this.cgiRoot + pathInfo);
+        // /bar/baz
+        env.put("PATH_INFO", pathInfo);
+        // x=y
+        env.put("QUERY_STRING", request.getQueryString());
 
         // Add in the rest of them
-
-        env.add("GATEWAY_INTERFACE=CGI/1.1");
-        env.add("SERVER_SOFTWARE=" + software);
-        env.add("SERVER_NAME=" + config.getHostname());
-        env.add("PATH_INFO=" + url.substring(pathInfoStartI));
-
-        String suffix = cgiFile.getName();
-        if (suffix.lastIndexOf('.') != -1)
-            suffix = suffix.substring(suffix.lastIndexOf('.'));
-        else suffix = "";
-        
-        String pre = url.substring(0, pathInfoStartI);
-        if (pre.endsWith(suffix)) {
-            env.add("SCRIPT_NAME=" + pre);
-        } else {
-            env.add("SCRIPT_NAME=" + pre + suffix);
-        }
-        env.add("SERVER_PORT=" + config.getServerPort());
-        env.add("REMOTE_ADDR="
-                + request.getSocket().getInetAddress().getHostAddress());
-        env.add("PATH_TRANSLATED=" + root + url.substring(pathInfoStartI));
-        env.add("REQUEST_METHOD=" + request.method);
-        env.add("SERVER_PROTOCOL=" + request.protocol);
-        env.add("QUERY_STRING=" + request.query);
-
-        if (config.getProtocol().equals("https")) env.add("HTTPS=on");
-
-        env.add("SERVER_URL=" + request.serverUrl());
-
-        // Append the "custom" environment variables (if requested)
-
-        if (!config.getRequestProperty(request, CUSTOM, "").equals(""))
+        env.put("GATEWAY_INTERFACE", "CGI/1.1");
+        env.put("SERVER_SOFTWARE", "Epic CGI Handler");
+        env.put("SERVER_NAME", request.getServerName());
+        env.put("SERVER_PORT", "" + request.getServerPort());
+        String servletPath = request.getServletPath();
+        if (null != servletPath)
         {
-            Map props = config.getProperties("");            
-            for (Iterator i = props.keySet().iterator(); i.hasNext();)
-            {
-                String key = (String) i.next();
-                env.add("CONFIG_" + key + "=" + props.get(key)); 
-            }            
-            env.add("CONFIG_PREFIX=" + config.getPropsPrefix());
+            env.put("SERVER_URL", servletPath);
         }
+        env.put("SERVER_PROTOCOL", request.getProtocol());
+        env.put("REQUEST_METHOD", request.getMethod());
+        env.put("REMOTE_ADDR", request.getRemoteAddr());
+        // env.put("PERLDB_OPTS", System.getenv("PERLDB_OPTS"));
+        if ("https".equals(request.getProtocol())) env.put("HTTPS", "on");
 
-        // Append environment variables provided by EPIC
-        // (configurable with the CGI Environment tab; if nothing
-        // is configured, the environment of the workbench is used)
-        
-        Map userEnv = config.getProperties(ENV + "_");
-        for (Iterator i = userEnv.keySet().iterator(); i.hasNext();)
+        // SESSIONNAME=Console
+        // PERL5LIB=c:\imdb\instance\active\data-core\src\IMDbSetup;c:\imdb\instance\active\Code;c:\imdb\instance\active\data-core\Code;c:\imdb\instance\active\odm\Code;export
+        // PERLDB_OPTS=
+        // PrintRet=0
+        diagLine("-------------------Environment Variables-------------------");
+        for (Map.Entry<String, String> e : env.entrySet())
         {
-            String key = (String) i.next();
-            env.add(key + "=" + userEnv.get(key)); 
+            diagLine(e.getKey() + "=" + e.getValue());
         }
-
-        String[] environ = (String[]) env.toArray(new String[env.size()]);
-
-        return environ;
+        return env;
     }
-    
-    /**
-     * Executes the given CGI script file using the provided
-     * command line and environment. Script stdout is returned
-     * both to the browser and to the CGI proxy. Script stderr
-     * is returned only to the CGI proxy.
-     */
-    private void execCGI(
-        Request request,
-        File cgiFile,
-        String[] command,
-        String[] env)
-    {        
-        mDiag.println("***********************************************************");
-        mDiag.println("Requested URI: " +
-            request.props.getProperty("url.orig", request.url));
-        mDiag.println("---------------------CGI Command Line----------------------");
-        for (int i = 0; i < command.length; i++) mDiag.println(command[i]);
-        mDiag.println("-------------------Environment Variables-------------------");
-        for (int i = 0; i < env.length; i++) mDiag.println(env[i]);
 
-        Process cgi = null;
-        StreamForwarder stderrFwd = null;
-        
+    private void diagLine(String line)
+    {
+        LOG.warn(line);
+        mDiag.println(line);
+    }
+
+    public static String getPostData(HttpServletRequest req)
+    {
+        StringBuilder sb = new StringBuilder();
         try
         {
-            cgi = Runtime.getRuntime().exec(
-                command, env, new File(cgiFile.getParentFile().getCanonicalPath()));
-
-            DataInputStream in = new DataInputStream(
-                new BufferedInputStream(cgi.getInputStream()));
-
-            // If we have data, send it to the process
-
-            if (request.postData != null)
+            BufferedReader reader = req.getReader();
+            reader.mark(10000);
+            String line;
+            do
             {
-                OutputStream toCgi = cgi.getOutputStream();
-                toCgi.write(request.postData, 0, request.postData.length);
-                toCgi.close();
-                mDiag.println("------------------------POST data--------------------------");
-                mDiag.println(new String(request.postData, "ISO-8859-1"));
-                mDiag.flush();
+                line = reader.readLine();
+                sb.append(line).append("\n");
             }
-            
-            stderrFwd = new StreamForwarder(
-                "EpicCgiHandler.readError",
-                new BufferedInputStream(cgi.getErrorStream()),
-                mError);
-            
-            stderrFwd.start();
+            while (line != null);
+            reader.reset();
+            // do NOT close the reader here, or you won't be able to get the
+            // post data twice
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException(e);
+        }
 
-            mDiag.println("-----------------------Script Output-----------------------");
-            
-            // Now get the output of the cgi script. Start by reading the
-            // "mini header", then just copy the rest
+        return sb.toString();
+    }
 
-            String head;
-            String type = "text/html";
-            int status = 200;
-            while (true)
+    private void execCGI(ProcessBuilder pb, Request baseRequest)
+    {
+        Thread stderrFwd = null;
+        Process cgi = null;
+        Response response = baseRequest.getResponse();
+        try
+        {
+            pb.redirectErrorStream(true);
+            cgi = pb.start();
+
+            if (MimeTypes.FORM_ENCODED.equalsIgnoreCase(baseRequest.getContentType())
+                && HttpMethods.POST.equals(baseRequest.getMethod()))
             {
-                head = in.readLine();
-                if (head == null || head.length() == 0)
+                String postData = getPostData(baseRequest);
+                if (null != postData && !postData.isEmpty())
                 {
-                    mOut.write("\r\n".getBytes());
-                    mOut.flush();
-                    break;
+                    OutputStream toCgi = cgi.getOutputStream();
+                    toCgi.write(postData.getBytes(Charsets.ISO_8859_1));
+                    toCgi.close();
+                    mDiag.println("------------------------POST data--------------------------");
+                    mDiag.println(postData);
+                    mDiag.flush();
                 }
-                mOut.write(head.getBytes("ISO-8859-1"));
-                mOut.write("\r\n".getBytes());
+            }
+
+            new Thread(new StreamForwarder("EpicCgiHandler.readError", new InputStreamReader(cgi.getErrorStream()),
+                mError)).start();
+
+            diagLine("-----------------------Script Output-----------------------");
+            BufferedReader in = new BufferedReader(new InputStreamReader(cgi.getInputStream(), Charsets.ISO_8859_1));
+            Pattern p = Pattern.compile("(\\S+):\\s*(.*)");
+            for (String header = in.readLine(); header != null && header.length() != 0; header = in.readLine())
+            {
+                mOut.write(header);
+                mOut.write("\r\n");
                 mOut.flush();
-                
-                int colonIndex = head.indexOf(':');
-                if (colonIndex < 0)
+
+                Matcher m = p.matcher(header);
+                if (!m.matches())
                 {
-                    request.sendError(500, "Missing header from cgi output");
-                    mError.write(
-                        "Error 500: Missing header from cgi output"
-                        .getBytes("ASCII"));
+                    response.sendError(500, "Missing header from cgi output");
                     return;
                 }
 
-                String lower = head.toLowerCase();
-                if (lower.startsWith("status:"))
+                String headerName = m.group(1);
+                String headerValue = m.group(2);
+                if ("location".equals(headerName.toLowerCase()))
                 {
-                    try
-                    {
-                        status = Integer.parseInt(
-                            head.substring(colonIndex + 1).trim());
-                    }
-                    catch (NumberFormatException e) { }
+                    response.sendRedirect(headerValue);
+                    return;
                 }
-                else if (lower.startsWith("content-type:"))
-                {
-                    type = head.substring(colonIndex + 1).trim();
-                }
-                else if (lower.startsWith("location:"))
-                {
-                    status = 302;
-                    request.addHeader(head);
-                }
-                else
-                {
-                    request.addHeader(head);
-                }
+
+                response.addHeader(headerName, headerValue);
             }
+            mOut.write("\r\n");
+            mOut.flush();
 
             /*
              * Now copy the rest of the data into a buffer, so we can count it.
              * we should be doing chunked encoding for 1.1 capable clients XXX
              */
-
-            ByteArrayOutputStream buff = new ByteArrayOutputStream();
-            byte[] buf = new byte[1024];
+            Writer buff = new OutputStreamWriter(response.getOutputStream(), Charsets.UTF_8);
+            char[] buf = new char[1024];
             int bread;
             while ((bread = in.read(buf, 0, buf.length)) > 0)
             {
@@ -484,27 +398,26 @@ public class EpicCgiHandler implements Handler
                 mOut.write(buf, 0, bread);
                 mOut.flush();
             }
-
-            request.sendHeaders(status, type, buff.size());
-            buff.writeTo(request.out);
-            request.log(Server.LOG_DIAGNOSTIC, "CGI output " + buff.size() + " bytes.");
-            cgi.waitFor();            
+            buff.flush();
+            response.complete();
+            LOG.info("CGI output " + response.getContentCount() + " bytes.");
+            cgi.waitFor();
         }
         catch (Exception e)
         {
             if (cgi != null) cgi.destroy();
-            
+
             StringWriter trace = new StringWriter();
             e.printStackTrace(new PrintWriter(trace, true));
-            request.sendError(500, "CGI failure", trace.toString());
             try
             {
-                mError.write(
-                    ("Error 500: " + "CGI failure: " + e.getMessage()).getBytes("ASCII")
-                    );
-                e.printStackTrace(new PrintStream(mError));
+                response.sendError(500, "CGI failure" + trace.toString());
+                mError.write("Error 500: " + "CGI failure: " + e.getMessage());
+                e.printStackTrace(mError);
             }
-            catch (IOException _e) { /* not much we can do really */}
+            catch (IOException _e)
+            { /* not much we can do really */
+            }
         }
         finally
         {
@@ -512,64 +425,179 @@ public class EpicCgiHandler implements Handler
             {
                 if (stderrFwd != null) stderrFwd.join();
             }
-            catch (Exception e) { }
+            catch (Exception e)
+            {
+            }
         }
     }
-    
-    /**
-     * Resolves the CGI script file to be executed based on the
-     * requested URI, configured CGI suffixes and the root directory.  
-     * 
-     * @return null if the resolution algorithm fails;
-     *         otherwise a 2-element array with:
-     *         File cgiFile (the resolved CGI script file) and
-     *         Integer pathInfoStartIndex (index in the uri at
-     *         which the CGI path ends and PATH_INFO to be passed
-     *         into the script begins)
-     */
-    private Object[] findCGIFile(
-        Request request,
-        String uri,
-        String suffixes,
-        String root)
+
+    private File findCgiFile(Deque<String> source)
     {
-        // Try to find the shortest prefix in url which can be mapped
-        // to an existing CGI script. This is to correctly extract
-        // PATH_INFO from URLs
-        // like http://localhost/cgi-bin/foo.cgi/some/path/info
-        // or even http://localhost/cgi-bin/foo/some/path/info
-        // (PATH_INFO=/some/path/info)
-        
-        String suffix = null;
-        StringTokenizer tok = new StringTokenizer(suffixes, ",");
-        int start = 1;
-        int end = 0;
-
-        while (tok.hasMoreTokens())
+        List<String> dest = new ArrayList<String>();
+        Joiner joiner = Joiner.on('/');
+        String part;
+        while (null != (part = source.poll()))
         {
-            suffix = tok.nextToken();
-            request.log(Server.LOG_DIAGNOSTIC, "Checking for suffix: " + suffix);
-            start = 1;
-            end = 0;
-            
-            while (end < uri.length())
+            // get the extension portion of s if any
+            String ext = null;
+            int extBegin;
+            if (-1 != (extBegin = part.lastIndexOf('.')))
             {
-                end = uri.indexOf('/', start);
-                if (end < 0) end = uri.length();
-
-                String s = uri.substring(1, end);
-                if (!s.endsWith(suffix)) s += suffix;
-
-                File cgiFile = new File(root, s);
-                request.log(Server.LOG_DIAGNOSTIC, "looking for: " + cgiFile);
-                if (cgiFile.isFile())
-                {
-                    request.log(Server.LOG_DIAGNOSTIC, "found: " + cgiFile);
-                    return new Object[] { cgiFile, new Integer(end) };
-                }
-                start = end + 1;
+                ext = part.substring(extBegin + 1);
             }
-        }        
+            dest.add(part);
+
+            String candidate = joiner.join(dest);
+            // Already has a candidate extension
+            if (ext != null && suffixes.contains(ext))
+            {
+                File retVal = new File(cgiRoot, candidate);
+                if (retVal.isFile())
+                {
+                    return retVal;
+                }
+            }
+            else
+            {
+                // Try all the suffixes in turn
+                for (String suffix : suffixes)
+                {
+                    File retVal = new File(cgiRoot, candidate + "." + suffix);
+                    if (retVal.isFile())
+                    {
+                        return retVal;
+                    }
+                }
+            }
+        }
         return null;
     }
+
+    public int getPortIn()
+    {
+        return portIn;
+    }
+
+    public void setPortIn(int portIn)
+    {
+        this.portIn = portIn;
+    }
+
+    public int getPortOut()
+    {
+        return portOut;
+    }
+
+    public void setPortOut(int portOut)
+    {
+        this.portOut = portOut;
+    }
+
+    public int getPortError()
+    {
+        return portError;
+    }
+
+    public void setPortError(int portErr)
+    {
+        this.portError = portErr;
+    }
+
+    public String getPerlExecutable()
+    {
+        return perlExecutable;
+    }
+
+    public void setPerlExecutable(String perlExecutable)
+    {
+        this.perlExecutable = perlExecutable;
+    }
+
+    public String getPerlParams()
+    {
+        return perlParams;
+    }
+
+    public void setPerlParams(String perlParams)
+    {
+        this.perlParams = perlParams;
+    }
+
+    public String[] getRunIncludes()
+    {
+        return runIncludes;
+    }
+
+    public void setRunIncludes(String... runIncludes)
+    {
+        this.runIncludes = runIncludes;
+    }
+
+    public String[] getDebugIncludes()
+    {
+        return debugIncludes;
+    }
+
+    public void setDebugIncludes(String... debugIncludes)
+    {
+        this.debugIncludes = debugIncludes;
+    }
+
+    public String getPrefix()
+    {
+        return prefix;
+    }
+
+    public void setPrefix(String prefix)
+    {
+        if (null != prefix) {
+            if (!prefix.startsWith("/")) {
+                prefix = "/" + prefix; 
+            }
+            if (!prefix.endsWith("/")) {
+                prefix = prefix + "/"; 
+            }
+        }
+        this.prefix = prefix;
+    }
+
+    public Set<String> getSuffixes()
+    {
+        return suffixes;
+    }
+
+    public void setSuffixes(String... suffixes)
+    {
+        this.suffixes = new HashSet<String>();
+        for (String suffix : suffixes)
+        {
+            if (suffix.startsWith("."))
+            {
+                suffix = suffix.substring(1);
+            }
+            this.suffixes.add(suffix);
+
+        }
+    }
+
+    public String getCgiRoot()
+    {
+        return cgiRoot;
+    }
+
+    public void setCgiRoot(String cgiRoot)
+    {
+        this.cgiRoot = cgiRoot;
+    }
+
+    public Map<String, String> getPerlEnv()
+    {
+        return perlEnv;
+    }
+
+    public void setPerlEnv(Map<String, String> perlEnv)
+    {
+        this.perlEnv = perlEnv;
+    }
+
 }

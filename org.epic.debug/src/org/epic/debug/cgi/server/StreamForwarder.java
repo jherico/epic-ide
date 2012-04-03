@@ -1,22 +1,27 @@
 package org.epic.debug.cgi.server;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.Reader;
+import java.io.Writer;
+
+import com.google.common.io.CharStreams;
 
 /**
- * A thread which forwards all bytes read from a source InputStream
- * to a destination OutputStream. After the thread terminates,
- * {@link getError} can be called to check if the the InputStream
+ * A thread which forwards all bytes read from a source Reader
+ * to a destination Writer. After the thread terminates,
+ * {@link getError} can be called to check if the the Writer
  * was closed properly or an exception has occured.
  */
-class StreamForwarder extends Thread
+class StreamForwarder implements Runnable
 {
-    private final InputStream src;
-    private final OutputStream dst;
+    private final Reader src;
+    private final Writer dst;
+    private final String name;
     private IOException error;
     
-    public StreamForwarder(String name, InputStream src, OutputStream dst)
+    public StreamForwarder(String name, Reader src, Writer dst)
     {
-        super(name);
+        this.name = name;
         this.src = src;
         this.dst = dst;
     }
@@ -28,15 +33,10 @@ class StreamForwarder extends Thread
     
     public void run()
     {
-        byte[] buf = new byte[1024];
+        Thread.currentThread().setName(name);
         try
         {
-            int bread;
-            while ((bread = src.read(buf, 0, buf.length)) > 0)
-            {
-                dst.write(buf, 0, bread);                            
-                dst.flush();
-            }
+            CharStreams.copy(src, dst); 
         }
         catch (IOException e)
         {

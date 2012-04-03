@@ -10,6 +10,7 @@ package org.epic.debug.cgi;
 import java.io.IOException;
 
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.PlatformObject;
 import org.eclipse.debug.core.*;
 import org.eclipse.debug.core.model.*;
@@ -17,108 +18,110 @@ import org.epic.debug.PerlDebugPlugin;
 import org.epic.debug.util.OutputStreamMonitor;
 import org.epic.debug.util.RemotePort;
 
-/** 
+/**
  * @author ST
- *
- * To change the template for this generated type comment go to
- * Window&gt;Preferences&gt;Java&gt;Code Generation&gt;Code and Comments
+ * 
+ *         To change the template for this generated type comment go to
+ *         Window&gt;Preferences&gt;Java&gt;Code Generation&gt;Code and Comments
  */
 public class CGIProxy extends PlatformObject implements IProcess, ITerminate
 {
-	private volatile boolean mIsConnected;
-	private Thread mWaitThread;
-	private OutputStreamMonitor mMonitorError;
-	private OutputStreamMonitor mMonitorOut;
-	private OutputStreamMonitor mMonitorIn;
+    private volatile boolean mIsConnected;
+    private OutputStreamMonitor mMonitorError;
+    private OutputStreamMonitor mMonitorOut;
+    private OutputStreamMonitor mMonitorIn;
     private ILaunch mLaunch;
     private String mLabel;
-	private RemotePort mInStream;
+    private RemotePort mInStream;
     private RemotePort mOutStream;
     private RemotePort mErrorStream;
     private boolean mIsTerminated;
     private IStreamsProxy mStreamsProxy;
 
-	public CGIProxy(ILaunch fLaunch, String fLabel)
-	{
-		mLaunch = fLaunch;
-		setAttribute(ATTR_PROCESS_TYPE, "EpicCGIProxy");
-		mIsConnected = false;
-		mIsTerminated = false;
-		mLabel = fLabel;
+    public CGIProxy(ILaunch fLaunch, String fLabel)
+    {
+        mLaunch = fLaunch;
+//        setAttribute(ATTR_PROCESS_TYPE, "EpicCGIProxy");
+        mIsConnected = false;
+        mIsTerminated = false;
+        mLabel = fLabel;
 
-		mInStream = new RemotePort("CGIProxy.mInStream");
+        mInStream = new RemotePort("CGIProxy.mInStream");
 		mInStream.startConnect();
-		mOutStream = new RemotePort("CGIProxy.mOutStream");
+        mOutStream = new RemotePort("CGIProxy.mOutStream");
 		mOutStream.startConnect();
-		mErrorStream = new RemotePort("CGIProxy.mErrorStream");
+        mErrorStream = new RemotePort("CGIProxy.mErrorStream");
 		mErrorStream.startConnect();
+    }
 
-		mWaitThread = new Thread("EPIC-Debugger:CGIProxy")
-		{
+    private class ProxyThread implements Runnable
+    {
+        public void run()
+        {
+            Thread.currentThread().setName("EPIC-Debugger:CGIProxy");
+            try
+            {
+                int ret;
+                ret = mInStream.waitForConnect(false);
+                if (ret == RemotePort.WAIT_OK)
+                    ret = mOutStream.waitForConnect(true);
+                if (ret == RemotePort.WAIT_OK)
+                    ret = mErrorStream.waitForConnect(true);
+                if (ret == RemotePort.WAIT_ERROR)
+                    PerlDebugPlugin.getDefault().logError(
+                        "Could not connect to CGI-Console");
+                if (ret != RemotePort.WAIT_OK)
+                {
+                    terminate();
+                    return;
+                }
+            } catch (DebugException e)
+            {
+                PerlDebugPlugin.getDefault().logError(
+                    "Could not connect to CGI-Console", 
+                    e);
+            }
 
-			public void run()
-			{
-				try
-				{
-					int ret;
-					ret = mInStream.waitForConnect(false);
-					if (ret == RemotePort.WAIT_ERROR)
-						PerlDebugPlugin.getDefault().logError(
-							"Could not connect to CGI-Console");
-					if (ret == RemotePort.WAIT_OK)
-					{
-						ret = mOutStream.waitForConnect(true);
-						if (ret == RemotePort.WAIT_OK)
-							ret = mErrorStream.waitForConnect(true);
-					}
+            mMonitorIn = new OutputStreamMonitor(mInStream.getInStream());
+            mMonitorOut = new OutputStreamMonitor(mOutStream.getInStream());
+            mMonitorError =
+            	new OutputStreamMonitor(mErrorStream.getInStream());
+            mMonitorIn.startMonitoring();
+            mMonitorOut.startMonitoring();
+            mMonitorError.startMonitoring();
+            mStreamsProxy = new IStreamsProxy() {
+                public IStreamMonitor getErrorStreamMonitor()
+                {
+                    return mMonitorError;
+                }
 
-					if (ret != RemotePort.WAIT_OK)
-					{
-						if (ret == RemotePort.WAIT_ERROR)
-							PerlDebugPlugin.getDefault().logError(
-								"Could not connect to CGI-Console");
-						terminate();
-						return;
-					}
-				} catch (DebugException e)
-				{
-					PerlDebugPlugin.getDefault().logError(
-						"Could not connect to CGI-Console",
-						e);
-				}
+                public IStreamMonitor getOutputStreamMonitor()
+                {
+                    return mMonitorOut;
+                }
 
-				mMonitorIn = new OutputStreamMonitor(mInStream.getInStream());
-				mMonitorOut = new OutputStreamMonitor(mOutStream.getInStream());
-				mMonitorError =
-					new OutputStreamMonitor(mErrorStream.getInStream());
-				mMonitorIn.startMonitoring();
-				mMonitorOut.startMonitoring();
-				mMonitorError.startMonitoring();
-                mStreamsProxy = new IStreamsProxy() {
-                    public IStreamMonitor getErrorStreamMonitor()
-                    {
-                        return mMonitorError;
-                    }
+                public void write(String input) 
+                	throws IOException
+                {
+                    // we can't provide input to a CGI process
+                    // through console
+                }
+            };
+            mIsConnected = true;
+            fireCreationEvent();
+			// Acquire the CGI proxy lock
+            synchronized (CGIProxy.this)
+            {
+            	// Release the wait started in CGILaunchConfigurationDelegate.doLaunch()
+                CGIProxy.this.notify();
+            }
+        }
+    }
 
-                    public IStreamMonitor getOutputStreamMonitor()
-                    {
-                        return mMonitorOut;
-                    }
-
-                    public void write(String input)
-                        throws IOException
-                    {
-                        // we can't provide input to a CGI process
-                        // through console
-                    }
-                };
-				mIsConnected = true;
-				fireCreationEvent();
-			}
-		};
-
-		mWaitThread.start();
-	}
+    public void startListening()
+    {
+        new Thread(new ProxyThread()).start();
+    }
 
 	public boolean isConnected()
 	{
@@ -164,75 +167,75 @@ public class CGIProxy extends PlatformObject implements IProcess, ITerminate
 		return mStreamsProxy;
 	}
 
-	/* (non-Javadoc)
-	 * @see org.eclipse.debug.core.model.IProcess#setAttribute(java.lang.String, java.lang.String)
-	 */
-	public void setAttribute(String key, String value)
-	{
-		ILaunchConfigurationWorkingCopy workingcopy;
-		try
-		{
-			workingcopy = mLaunch.getLaunchConfiguration().getWorkingCopy();
-			workingcopy.setAttribute(key, value);
-			workingcopy.doSave();
-		} catch (CoreException e)
-		{
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		}
+    /* (non-Javadoc)
+     * @see org.eclipse.debug.core.model.IProcess#setAttribute(java.lang.String, java.lang.String)
+     */
+    public void setAttribute(String key, String value)
+    {
+        ILaunchConfigurationWorkingCopy workingcopy;
+        try
+        {
+            workingcopy = mLaunch.getLaunchConfiguration().getWorkingCopy();
+            workingcopy.setAttribute(key, value);
+            workingcopy.doSave();
+        } catch (CoreException e)
+        {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
 
-	}
+    }
 
-	/* (non-Javadoc)
-	 * @see org.eclipse.debug.core.model.IProcess#getAttribute(java.lang.String)
-	 */
-	public String getAttribute(String key)
-	{
-		try
-		{
-			return mLaunch.getLaunchConfiguration().getAttribute(
-				key,
-				(String) null);
-		} catch (CoreException e)
-		{
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		}
-		return null;
-	}
-
-	/* (non-Javadoc)
-	 * @see org.eclipse.debug.core.model.IProcess#getExitValue()
-	 */
-	public int getExitValue() throws DebugException
-	{
-		return 0;
-	}
+    /* (non-Javadoc)
+     * @see org.eclipse.debug.core.model.IProcess#getAttribute(java.lang.String)
+     */
+    public String getAttribute(String key)
+    {
+        try
+        {
+            return mLaunch.getLaunchConfiguration().getAttribute(
+            	key,
+                (String) null);
+        } catch (CoreException e)
+        {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
+        return null;
+    }
 
 	/* (non-Javadoc)
-	 * @see org.eclipse.core.runtime.IAdaptable#getAdapter(java.lang.Class)
-	 */
-	public Object getAdapter(Class adapter)
-	{
-		if (adapter.equals(IProcess.class))
-		{
-			return this;
-		}
-		if (adapter.equals(IDebugTarget.class))
-		{
-			ILaunch launch = getLaunch();
-			IDebugTarget[] targets = launch.getDebugTargets();
-			for (int i = 0; i < targets.length; i++)
-			{
-				if (this.equals(targets[i].getProcess()))
-				{
-					return targets[i];
-				}
-			}
-			return null;
-		}
-		return super.getAdapter(adapter);
-	}
+     * @see org.eclipse.debug.core.model.IProcess#getExitValue()
+     */
+    public int getExitValue() throws DebugException
+    {
+        return 0;
+    }
+
+	/* (non-Javadoc)
+     * @see org.eclipse.core.runtime.IAdaptable#getAdapter(java.lang.Class)
+     */
+    public Object getAdapter(Class adapter)
+    {
+        if (adapter.equals(IProcess.class))
+        {
+            return this;
+        }
+        if (adapter.equals(IDebugTarget.class))
+        {
+            ILaunch launch = getLaunch();
+            IDebugTarget[] targets = launch.getDebugTargets();
+            for (int i = 0; i < targets.length; i++)
+            {
+                if (this.equals(targets[i].getProcess()))
+                {
+                    return targets[i];
+                }
+            }
+            return null;
+        }
+        return super.getAdapter(adapter);
+    }
 
 	/* (non-Javadoc)
 	 * @see org.eclipse.debug.core.model.ITerminate#canTerminate()
@@ -279,7 +282,7 @@ public class CGIProxy extends PlatformObject implements IProcess, ITerminate
 		return mMonitorIn;
 	}
 
-	/**
+    /**
 	 * Fire a debug event marking the creation of this element.
 	 */
 	private void fireCreationEvent()
@@ -288,16 +291,16 @@ public class CGIProxy extends PlatformObject implements IProcess, ITerminate
 	}
 
 	/**
-	 * Fire a debug event
-	 */
-	private void fireEvent(DebugEvent event)
-	{
-		DebugPlugin manager = DebugPlugin.getDefault();
-		if (manager != null)
-		{
-			manager.fireDebugEventSet(new DebugEvent[] { event });
-		}
-	}
+     * Fire a debug event
+     */
+    private void fireEvent(DebugEvent event)
+    {
+        DebugPlugin manager = DebugPlugin.getDefault();
+        if (manager != null)
+        {
+            manager.fireDebugEventSet(new DebugEvent[] { event });
+        }
+    }
 
 	/**
 		 * Fire a debug event marking the termination of this process.
@@ -307,28 +310,16 @@ public class CGIProxy extends PlatformObject implements IProcess, ITerminate
 		fireEvent(new DebugEvent(this, DebugEvent.TERMINATE));
 	}
 
-	void shutdown()
-	{
-		mMonitorError.kill();
-		mMonitorOut.kill();
-		mMonitorIn.kill();
-		mInStream.shutdown();
-		mOutStream.shutdown();
-		mErrorStream.shutdown();
-		mIsTerminated = true;
+    void shutdown()
+    {
+        mMonitorError.kill();
+        mMonitorOut.kill();
+        mMonitorIn.kill();
+        mInStream.shutdown();
+        mOutStream.shutdown();
+        mErrorStream.shutdown();
+        mIsTerminated = true;
 		fireTerminateEvent();
-	}
-	/**
-	 * @return
-	 */
-	public Thread getWaitThread()
-	{
-		return mWaitThread;
-	}
+    }
 
-	public void waitForConnect()
-	{
-		try { mWaitThread.join(30000); }
-        catch (InterruptedException e) { }
-	}
 }
