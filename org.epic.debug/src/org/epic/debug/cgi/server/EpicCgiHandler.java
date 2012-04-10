@@ -14,7 +14,6 @@ import java.net.Socket;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Deque;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -82,7 +81,6 @@ public class EpicCgiHandler extends org.eclipse.jetty.server.handler.AbstractHan
 
     private static final Function<String, String> INCLUDE_PREPENDER = 
         new Function<String, String>() {
-            @Override
             public String apply(String arg0) {
                 // TODO Auto-generated method stub
                 return "-I" + arg0;
@@ -119,7 +117,6 @@ public class EpicCgiHandler extends org.eclipse.jetty.server.handler.AbstractHan
         }
     }
       
-    @Override
     public void handle(String target, Request baseRequest, HttpServletRequest request, HttpServletResponse response)
         throws IOException, ServletException
     {
@@ -299,7 +296,6 @@ public class EpicCgiHandler extends org.eclipse.jetty.server.handler.AbstractHan
         env.putAll(perlEnv);
         
         return Maps.filterValues(env, new Predicate<String>() {
-            @Override
             public boolean apply(String input)
             {
                 return input != null; 
@@ -335,7 +331,7 @@ public class EpicCgiHandler extends org.eclipse.jetty.server.handler.AbstractHan
             if (MimeTypes.FORM_ENCODED.equalsIgnoreCase(baseRequest.getContentType())
                 && HttpMethods.POST.equals(baseRequest.getMethod())
                 && (null != (postData = getPostData(baseRequest))) 
-                && !postData.isEmpty())
+                && (postData.length() != 0))
             {
                 OutputStream toCgi = cgi.getOutputStream();
    	            toCgi.write(postData.getBytes());
@@ -464,7 +460,7 @@ public class EpicCgiHandler extends org.eclipse.jetty.server.handler.AbstractHan
      *         which the CGI path ends and PATH_INFO to be passed
      *         into the script begins)
      */
-    private File findCgiFile(Deque<String> source)
+    private File findCgiFile(LinkedList<String> source)
     {
         List<String> dest = new ArrayList<String>();
         Joiner joiner = Joiner.on('/');

@@ -1,0 +1,253 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configure class="org.eclipse.jetty.server.Server">
+    <Call name="addConnector">
+        <Arg>
+            <New class="org.eclipse.jetty.server.nio.SelectChannelConnector">
+                <Set name="port">5003</Set>
+            </New>
+        </Arg>
+    </Call>
+    <Set name="handler">
+        <New class="org.eclipse.jetty.server.handler.HandlerList">
+            <Set name="handlers">
+                <Array type="org.eclipse.jetty.server.Handler">
+                    <Item>
+                        <New id="cgiHandler" class="org.epic.debug.cgi.server.EpicCgiHandler" />
+                    </Item>
+                    <Item>
+                        <New id="resourceHandler" class="org.eclipse.jetty.server.handler.ResourceHandler" />
+                    </Item>
+                </Array>
+            </Set>
+        </New>
+    </Set>
+    <Ref id="cgiHandler">
+        <Set name="portIn">5000</Set>
+        <Set name="portOut">5001</Set>
+        <Set name="portError">5002</Set>
+        <Set name="perlExecutable">perl</Set>
+        <Set name="perlParams"></Set>
+        <Set name="runIncludes">
+            <Array type="java.lang.String" />
+        </Set>
+        <Set name="debugIncludes">
+            <Array type="java.lang.String">
+                <Item>C:/Users/bdavis/runtime-EclipseApplication/.metadata/.plugins/org.epic.debug</Item>
+            </Array>
+        </Set>
+        <Set name="cgiRoot">C:/Users/bdavis/runtime-EclipseApplication/CGI_Test/cgi</Set>
+        <Set name="prefix">/</Set>
+        <Set name="suffixes">
+            <Array type="java.lang.String">
+                <Item>.cgi</Item>
+                <Item>.pl</Item>
+            </Array>
+        </Set>
+        <Set name="perlEnv">
+            <Map>
+                <Entry>
+                    <Item>USERPROFILE</Item>
+                    <Item>C:\Users\bdavis</Item>
+                </Entry>
+                <Entry>
+                    <Item>HOMEDRIVE</Item>
+                    <Item>C:</Item>
+                </Entry>
+                <Entry>
+                    <Item>COMMONPROGRAMFILES</Item>
+                    <Item>C:\Program Files\Common Files</Item>
+                </Entry>
+                <Entry>
+                    <Item>WINDOWS_TRACING_FLAGS</Item>
+                    <Item>3</Item>
+                </Entry>
+                <Entry>
+                    <Item>VBOX_INSTALL_PATH</Item>
+                    <Item>C:\Program Files\Oracle\VirtualBox\</Item>
+                </Entry>
+                <Entry>
+                    <Item>APPDATA</Item>
+                    <Item>C:\Users\bdavis\AppData\Roaming</Item>
+                </Entry>
+                <Entry>
+                    <Item>PROGRAMFILES</Item>
+                    <Item>C:\Program Files</Item>
+                </Entry>
+                <Entry>
+                    <Item>OS</Item>
+                    <Item>Windows_NT</Item>
+                </Entry>
+                <Entry>
+                    <Item>LOCALAPPDATA</Item>
+                    <Item>C:\Users\bdavis\AppData\Local</Item>
+                </Entry>
+                <Entry>
+                    <Item>PROGRAMW6432</Item>
+                    <Item>C:\Program Files</Item>
+                </Entry>
+                <Entry>
+                    <Item>PATHEXT</Item>
+                    <Item>.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC</Item>
+                </Entry>
+                <Entry>
+                    <Item>PROMPT</Item>
+                    <Item>$P$G</Item>
+                </Entry>
+                <Entry>
+                    <Item>NUMBER_OF_PROCESSORS</Item>
+                    <Item>8</Item>
+                </Entry>
+                <Entry>
+                    <Item>UGII_3DCONNEXION_LIBRARY</Item>
+                    <Item>%UGII_BASE_DIR%\ugalliance\vendor\startup\3DxNX.dll</Item>
+                </Entry>
+                <Entry>
+                    <Item>FP_NO_HOST_CHECK</Item>
+                    <Item>NO</Item>
+                </Entry>
+                <Entry>
+                    <Item>HOMEPATH</Item>
+                    <Item>\Users\bdavis</Item>
+                </Entry>
+                <Entry>
+                    <Item>COMMONPROGRAMFILES(X86)</Item>
+                    <Item>C:\Program Files (x86)\Common Files</Item>
+                </Entry>
+                <Entry>
+                    <Item>PATH</Item>
+                    <Item>C:\Java\jdk1.5.0_22\jre\bin;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;C:\Program
+                        Files\Common Files\Microsoft Shared\Windows
+                        Live;C:\Perl\site\bin;C:\Perl\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Program
+                        Files (x86)\Git\cmd;c:\java\ant\bin;c:\bin;C:\Program Files (x86)\MKVToolNix;C:\Program Files
+                        (x86)\QuickTime\QTSystem\;C:\MinGW\bin;C:\strawberry\c\bin;C:\strawberry\perl\site\bin;C:\strawberry\perl\bin;C:\Program
+                        Files\Common Files\Microsoft Shared\Windows Live</Item>
+                </Entry>
+                <Entry>
+                    <Item>PERL_YAML_BACKEND</Item>
+                    <Item>YAML</Item>
+                </Entry>
+                <Entry>
+                    <Item>USERDOMAIN</Item>
+                    <Item>monolith</Item>
+                </Entry>
+                <Entry>
+                    <Item>PROGRAMDATA</Item>
+                    <Item>C:\ProgramData</Item>
+                </Entry>
+                <Entry>
+                    <Item>TERM</Item>
+                    <Item>dumb</Item>
+                </Entry>
+                <Entry>
+                    <Item>PROCESSOR_ARCHITECTURE</Item>
+                    <Item>AMD64</Item>
+                </Entry>
+                <Entry>
+                    <Item>LGSDIR</Item>
+                    <Item>C:\Program Files\Logitech Gaming Software\</Item>
+                </Entry>
+                <Entry>
+                    <Item>PSMODULEPATH</Item>
+                    <Item>C:\Windows\system32\WindowsPowerShell\v1.0\Modules\</Item>
+                </Entry>
+                <Entry>
+                    <Item>QTJAVA</Item>
+                    <Item>C:\Program Files (x86)\Java\jre6\lib\ext\QTJava.zip</Item>
+                </Entry>
+                <Entry>
+                    <Item>TEMP</Item>
+                    <Item>C:\Users\bdavis\AppData\Local\Temp</Item>
+                </Entry>
+                <Entry>
+                    <Item>PERL_JSON_BACKEND</Item>
+                    <Item>JSON::XS</Item>
+                </Entry>
+                <Entry>
+                    <Item>WINDOWS_TRACING_LOGFILE</Item>
+                    <Item>C:\BVTBin\Tests\installpackage\csilogfile.log</Item>
+                </Entry>
+                <Entry>
+                    <Item>SYSTEMDRIVE</Item>
+                    <Item>C:</Item>
+                </Entry>
+                <Entry>
+                    <Item>PROCESSOR_REVISION</Item>
+                    <Item>1a05</Item>
+                </Entry>
+                <Entry>
+                    <Item>SYSTEMROOT</Item>
+                    <Item>C:\Windows</Item>
+                </Entry>
+                <Entry>
+                    <Item>COMMONPROGRAMW6432</Item>
+                    <Item>C:\Program Files\Common Files</Item>
+                </Entry>
+                <Entry>
+                    <Item>COMSPEC</Item>
+                    <Item>C:\Windows\system32\cmd.exe</Item>
+                </Entry>
+                <Entry>
+                    <Item>SESSIONNAME</Item>
+                    <Item>Console</Item>
+                </Entry>
+                <Entry>
+                    <Item>LOGONSERVER</Item>
+                    <Item>\\MONOLITH</Item>
+                </Entry>
+                <Entry>
+                    <Item>WINDIR</Item>
+                    <Item>C:\Windows</Item>
+                </Entry>
+                <Entry>
+                    <Item>PROCESSOR_LEVEL</Item>
+                    <Item>6</Item>
+                </Entry>
+                <Entry>
+                    <Item>ASL.LOG</Item>
+                    <Item>Destination=file</Item>
+                </Entry>
+                <Entry>
+                    <Item>PUBLIC</Item>
+                    <Item>C:\Users\Public</Item>
+                </Entry>
+                <Entry>
+                    <Item>USERNAME</Item>
+                    <Item>bdavis</Item>
+                </Entry>
+                <Entry>
+                    <Item>PROCESSOR_IDENTIFIER</Item>
+                    <Item>Intel64 Family 6 Model 26 Stepping 5, GenuineIntel</Item>
+                </Entry>
+                <Entry>
+                    <Item>PROGRAMFILES(X86)</Item>
+                    <Item>C:\Program Files (x86)</Item>
+                </Entry>
+                <Entry>
+                    <Item>ALLUSERSPROFILE</Item>
+                    <Item>C:\ProgramData</Item>
+                </Entry>
+                <Entry>
+                    <Item>COMPUTERNAME</Item>
+                    <Item>MONOLITH</Item>
+                </Entry>
+                <Entry>
+                    <Item>CLASSPATH</Item>
+                    <Item>.;C:\Program Files (x86)\Java\jre6\lib\ext\QTJava.zip</Item>
+                </Entry>
+                <Entry>
+                    <Item>TMP</Item>
+                    <Item>C:\Users\bdavis\AppData\Local\Temp</Item>
+                </Entry>
+                <Entry>
+                    <Item>PERLDB_OPTS</Item>
+                    <Item>RemotePort=10.0.1.1:5000 DumpReused ReadLine=0 PrintRet=0</Item>
+                </Entry>
+            </Map>
+        </Set>
+        <Call name="connectToCGIProxy" />
+    </Ref>
+    <Ref id="resourceHandler">
+        <Set name="resourceBase">file:/C:/Users/bdavis/runtime-EclipseApplication/CGI_Test/html</Set>
+        <Set name="directoriesListed">true</Set>
+    </Ref>
+</Configure>
